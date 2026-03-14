@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.1.3"
+local MODULE_VERSION = "2.1.4"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -2221,14 +2221,8 @@ local function Bootstrap(attempt)
         if blackoutKickCasted then
             return true
         end
-        if blackoutKickReason == "out_of_range" or blackoutKickReason == "bad_facing" then
-            LogStall(target, "waiting_for_blackout_kick_range", {
-                distance = RoundNumber(distance, 2),
-                facingDelta = RoundNumber(GetFacingDeltaToTarget(target), 3),
-                reason = blackoutKickReason,
-            })
-            return false
-        end
+        -- BoK out of range/facing: don't stall, fall through to lower priorities (KS/EK work at range)
+        -- (Previously returned false here, blocking KS at 10yd and EK at range during kiting)
 
         -- Priority 6: Breath of Fire (if not already covered by KS→BoF combo)
         if Config.useBreathOfFire
