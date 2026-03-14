@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.3.3"
+local MODULE_VERSION = "2.3.4"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -1391,11 +1391,14 @@ local function Bootstrap(attempt)
             return false, "not_known"
         end
 
-        if StateCache.enemiesInMelee < 1 then
-            Logger:LogBlocked(Spells.BreathOfFire, target, context or "breath_of_fire", "no_enemy_in_melee", {
-                enemiesInMelee = StateCache.enemiesInMelee,
+        -- BoF is a frontal cone: check target distance, not enemiesInMelee
+        -- (enemiesInMelee count is unreliable due to enemy.distance being nil)
+        local dist = target and target.distance
+        if not dist or dist > 12 then
+            Logger:LogBlocked(Spells.BreathOfFire, target, context or "breath_of_fire", "target_out_of_range", {
+                distance = dist and RoundNumber(dist, 2) or "nil",
             })
-            return false, "no_enemy_in_melee"
+            return false, "target_out_of_range"
         end
 
         local casted, reason = TryTargetCast(Spells.BreathOfFire, target, context or "breath_of_fire")
