@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.3.0"
+local MODULE_VERSION = "2.3.1"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -3175,6 +3175,20 @@ local function Bootstrap(attempt)
             end
         end
     end)
+
+    -- Register COMBAT_LOG event for confirmed spell tracking
+    if warden.onEvent then
+        warden.onEvent("COMBAT_LOG_EVENT_UNFILTERED", function(...)
+            if not running then return end
+            local _, event, _, sourceGUID, _, _, _, _, _, _, _, spellID, spellName = ...
+            if event == "SPELL_CAST_SUCCESS" and sourceGUID == warden.player.guid then
+                Logger:Log("spell_confirmed", spellName or "Unknown", {
+                    spellId = spellID,
+                    spellName = spellName,
+                }, warden.target)
+            end
+        end)
+    end
 
     Success("Brewmaster v" .. MODULE_VERSION .. " loaded. Commands: /bm, /brewmaster")
 end
