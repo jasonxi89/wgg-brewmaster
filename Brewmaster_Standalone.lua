@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.2.0"
+local MODULE_VERSION = "2.2.1"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -2163,15 +2163,18 @@ local function Bootstrap(attempt)
             local bofCD = Spells.BreathOfFire and Spells.BreathOfFire.cd or 999
             local gcdLeft = warden.GetGCD and warden.GetGCD() or 0
 
-            if bofCD > 0 then
-                -- BoF on real CD (Sal talent not working or already consumed) → abandon
-                Logger:LogBlocked(Spells.BreathOfFire, target, "combo_abandoned", "bof_on_cd", {
+            if StateCache.hasSalTalent then
+                -- Has Sal talent: KS WILL reset BoF CD (server latency may show bofCD > 0 briefly)
+                -- Just wait — the 1.5s timeout is the only escape
+                return false
+            elseif bofCD > 0 then
+                -- No Sal talent, BoF truly on CD → abandon combo
+                Logger:LogBlocked(Spells.BreathOfFire, target, "combo_abandoned", "bof_on_cd_no_sal", {
                     bofCD = RoundNumber(bofCD, 2),
                     gcdLeft = RoundNumber(gcdLeft, 2),
                 })
                 comboState = "idle"
                 comboStartTime = 0
-                -- Fall through to normal priorities
             else
                 -- BoF CD=0, blocked by GCD or facing/range → wait
                 return false
