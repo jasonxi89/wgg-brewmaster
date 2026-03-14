@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.4.0"
+local MODULE_VERSION = "2.4.1"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -73,6 +73,12 @@ local function Bootstrap(attempt)
     end
 
     local warden = _G.warden
+
+    -- Class/spec guard: only load for Brewmaster Monk (specID 268)
+    if warden.specID ~= 268 then
+        return
+    end
+
     local tickHandle = nil
 
     -- Warden compatibility helpers
