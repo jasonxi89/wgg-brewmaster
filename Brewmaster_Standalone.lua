@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.3.4"
+local MODULE_VERSION = "2.3.5"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -2122,12 +2122,16 @@ local function Bootstrap(attempt)
 
         -- GCD gate: don't attempt on-GCD casts while GCD is active
         -- (warden spell:Cast() returns true during GCD, causing duplicate logs)
+        -- GCD gate with spell queue: allow casting when GCD is nearly done
+        -- WoW has a 400ms spell queue window; we use latency as the pre-cast window
         local gcdActive = false
         if C_Spell and C_Spell.GetSpellCooldown then
             local gcdInfo = C_Spell.GetSpellCooldown(61304)
             if gcdInfo and gcdInfo.duration and gcdInfo.duration > 0 and gcdInfo.startTime then
                 local gcdLeft = (gcdInfo.startTime + gcdInfo.duration) - now
-                if gcdLeft > 0.1 then  -- 100ms tolerance
+                local latency = warden.latency or 0.1
+                local queueWindow = math.max(latency, 0.1)  -- at least 100ms
+                if gcdLeft > queueWindow then
                     gcdActive = true
                 end
             end
