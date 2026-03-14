@@ -2226,10 +2226,6 @@ local function Bootstrap(attempt)
                 -- No enemies in melee or no API → wait
                 return false
             end
-            else
-                -- BoF CD=0, blocked by GCD or facing/range → wait
-                return false
-            end
         end
 
         -- ============================================================
