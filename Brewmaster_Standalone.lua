@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.1.6"
+local MODULE_VERSION = "2.2.0"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -286,6 +286,7 @@ local function Bootstrap(attempt)
         hasCelestialBrewTalent = false,
         hasCelestialInfusionTalent = false,
         hasBreathOfFireTalent = false,
+        hasSalTalent = false,
     }
 
     local talentsDetected = false
@@ -1109,6 +1110,7 @@ local function Bootstrap(attempt)
         StateCache.hasCelestialBrewTalent = IsPlayerSpell(322507)
         StateCache.hasCelestialInfusionTalent = IsPlayerSpell(1241059)
         StateCache.hasBreathOfFireTalent = IsPlayerSpell(115181)
+        StateCache.hasSalTalent = warden.player.hastalent(383697) and true or false
     end
 
     local function GetFractionalSpellCharges(spellOrId)
@@ -2082,7 +2084,9 @@ local function Bootstrap(attempt)
         return false
     end
 
-    local lastKegSmashTime = 0
+    local comboState = "idle"       -- "idle" | "waiting_bof"
+    local comboStartTime = 0        -- GetTime() when combo started
+    local COMBO_TIMEOUT = 1.5       -- seconds
     local niuzaoActive = false
     local niuzaoExpiry = 0
 
@@ -2118,83 +2122,103 @@ local function Bootstrap(attempt)
             niuzaoActive = false
         end
 
-        -- Priority 0: Emergency defensives
+        -- Combo timeout safety net (single, clean reset)
+        if comboState == "waiting_bof" and (now - comboStartTime) >= COMBO_TIMEOUT then
+            Logger:LogBlocked(Spells.BreathOfFire, target, "combo_timeout", "timeout_1.5s", {
+                elapsed = RoundNumber(now - comboStartTime, 2),
+            })
+            comboState = "idle"
+            comboStartTime = 0
+        end
+
+        -- Safety: if BoF config disabled, clear combo
+        if comboState == "waiting_bof" and not Config.useBreathOfFire then
+            comboState = "idle"
+            comboStartTime = 0
+        end
+
+        -- ============================================================
+        -- PHASE 0: Off-GCD (defensives + interrupt, always checked)
+        -- ============================================================
         if ManageDefensives() then
             return true
         end
 
-        -- Priority 1: Interrupt tracked casts
         if TryConfiguredInterrupt() then
             return true
         end
 
-        -- Burst mode: during Niuzao, BoF gets elevated priority (城壁之智: triggers 9x Flurry Strikes)
+        -- ============================================================
+        -- PHASE 1: KS→BoF forced combo (when Sal'salabim talent active)
+        -- ============================================================
+        if comboState == "waiting_bof" then
+            local casted = CastBreathOfFire(target, "post_keg_breath")
+            if casted then
+                comboState = "idle"
+                comboStartTime = 0
+                return true
+            end
+
+            -- Diagnose why BoF failed
+            local bofCD = Spells.BreathOfFire and Spells.BreathOfFire.cd or 999
+            local gcdLeft = warden.GetGCD and warden.GetGCD() or 0
+
+            if bofCD > 0 then
+                -- BoF on real CD (Sal talent not working or already consumed) → abandon
+                Logger:LogBlocked(Spells.BreathOfFire, target, "combo_abandoned", "bof_on_cd", {
+                    bofCD = RoundNumber(bofCD, 2),
+                    gcdLeft = RoundNumber(gcdLeft, 2),
+                })
+                comboState = "idle"
+                comboStartTime = 0
+                -- Fall through to normal priorities
+            else
+                -- BoF CD=0, blocked by GCD or facing/range → wait
+                return false
+            end
+        end
+
+        -- ============================================================
+        -- PHASE 2: Burst BoF (Niuzao active, elevated priority)
+        -- ============================================================
         if niuzaoActive and Config.useBreathOfFire and StateCache.hasBreathOfFireTalent
             and not StateCache.hasBreathOfFireDot
         then
             local casted = CastBreathOfFire(target, "burst_breath_of_fire")
-            if casted then
-                lastKegSmashTime = 0  -- burst BoF satisfies the KS→BoF combo
-                return true
-            end
+            if casted then return true end
         end
 
-        -- Priority 2: KS→BoF forced combo (KS resets BoF CD, so only GCD can block it)
-        -- Safety: if BoF is disabled, clear combo state immediately
-        if lastKegSmashTime > 0 and not Config.useBreathOfFire then
-            lastKegSmashTime = 0
-        end
-        if Config.useBreathOfFire and lastKegSmashTime > 0 then
-            if (now - lastKegSmashTime) < 1.5 then
-                local casted, reason = CastBreathOfFire(target, "post_keg_breath")
-                if casted then
-                    lastKegSmashTime = 0
-                    return true
-                end
-                -- Check why BoF failed
-                local bofCD = Spells.BreathOfFire and Spells.BreathOfFire.cd or 999
-                if bofCD <= 0 then
-                    -- BoF CD=0 (KS reset it via Sal talent), transient block (GCD/facing) → wait
-                    return false
-                else
-                    -- BoF on real CD (no Sal talent) or structural block → abandon immediately
-                    Logger:LogBlocked(Spells.BreathOfFire, target, "post_keg_breath_abandoned", "bof_on_cd_after_ks", {
-                        bofCD = RoundNumber(bofCD, 2),
-                        reason = reason,
-                        timeSinceKS = RoundNumber(now - lastKegSmashTime, 2),
-                    })
-                    lastKegSmashTime = 0
-                end
-            else
-                -- 1.5s window expired without BoF — safety reset to prevent permanent KS lockout
-                lastKegSmashTime = 0
-            end
-        end
+        -- ============================================================
+        -- PHASE 3: Normal GCD priority
+        -- ============================================================
 
-        -- Priority 3: Keg Smash at 2 charges (prevent waste)
-        -- Skip if waiting for KS→BoF combo (don't override lastKegSmashTime with new KS)
-        if lastKegSmashTime == 0
-            and StateCache.kegSmashCharges >= 2
+        -- P3: Keg Smash at 2 charges (prevent overcap)
+        if StateCache.kegSmashCharges >= 2
             and StateCache.playerEnergy >= Config.comboKegSmashEnergy
         then
             if CastKegSmash(target, "keg_smash_prevent_overcap") then
-                lastKegSmashTime = now
+                if StateCache.hasSalTalent then
+                    comboState = "waiting_bof"
+                    comboStartTime = now
+                end
                 return true
             end
         end
 
-        -- Priority 4: Blackout Combo branch (BC buff active)
-        -- Skip BC→KS if waiting for KS→BoF combo
-        if StateCache.hasBlackoutCombo and lastKegSmashTime == 0 then
-            -- BC + KS has charges or nearly ready → save BC for KS, wait for energy
+        -- P4: Blackout Combo branch
+        if StateCache.hasBlackoutCombo then
+            -- BC + KS nearly ready → save BC for KS, wait for energy
             if StateCache.kegSmashFractionalCharges >= 0.7 then
                 if StateCache.playerEnergy >= Config.comboKegSmashEnergy then
                     if CastKegSmash(target, "blackout_combo_keg_smash") then
-                        lastKegSmashTime = now
+                        if StateCache.hasSalTalent then
+                            comboState = "waiting_bof"
+                            comboStartTime = now
+                        end
                         return true
                     end
                 end
-                -- Wait for energy — use Chi Burst as filler while waiting
+                -- Wait for energy — Chi Burst as filler
                 if StateCache.hasChiBurstTalent then
                     local casted = TryTargetCast(Spells.ChiBurst, target, "chi_burst_while_waiting_energy")
                     if casted then return true end
@@ -2208,22 +2232,21 @@ local function Bootstrap(attempt)
                 return false
             end
 
-            -- BC + KS no charges → consume BC with Tiger Palm
+            -- BC + KS not ready → consume BC with Tiger Palm
             if StateCache.playerEnergy >= Config.comboTigerPalmEnergy then
                 local casted = TryTargetCast(Spells.TigerPalm, target, "blackout_combo_tiger_palm")
                 if casted then return true end
             end
         end
 
-        -- Priority 5: Blackout Kick on CD
-        local blackoutKickCasted, blackoutKickReason = TryTargetCast(Spells.BlackoutKick, target, "blackout_kick_on_cooldown")
+        -- P5: Blackout Kick on CD
+        local blackoutKickCasted = TryTargetCast(Spells.BlackoutKick, target, "blackout_kick_on_cooldown")
         if blackoutKickCasted then
             return true
         end
-        -- BoK out of range/facing: don't stall, fall through to lower priorities (KS/EK work at range)
-        -- (Previously returned false here, blocking KS at 10yd and EK at range during kiting)
+        -- BoK out of range/facing: fall through (don't stall, KS/EK work at range)
 
-        -- Priority 6: Breath of Fire (if not already covered by KS→BoF combo)
+        -- P6: Breath of Fire (independent, when target has no BoF debuff)
         if Config.useBreathOfFire
             and StateCache.hasBreathOfFireTalent
             and not StateCache.hasBreathOfFireDot
@@ -2232,27 +2255,29 @@ local function Bootstrap(attempt)
             if casted then return true end
         end
 
-        -- Priority 7: Keg Smash with 1 charge (skip if waiting for KS→BoF)
-        if lastKegSmashTime == 0
-            and StateCache.kegSmashFractionalCharges >= 1
+        -- P7: Keg Smash with 1 charge
+        if StateCache.kegSmashFractionalCharges >= 1
             and StateCache.playerEnergy >= Config.defaultKegSmashEnergy
         then
             if CastKegSmash(target, "keg_smash_single_charge") then
-                lastKegSmashTime = now
+                if StateCache.hasSalTalent then
+                    comboState = "waiting_bof"
+                    comboStartTime = now
+                end
                 return true
             end
         end
 
-        -- Priority 8: Burst Niuzao
+        -- P8: Burst Niuzao
         if ShouldUseBurstNiuzao() and TrySelfCast(Spells.InvokeNiuzao, "invoke_niuzao_with_sober") then
             burstNiuzaoPending = false
             burstNiuzaoWindowExpiresAt = 0
             niuzaoActive = true
-            niuzaoExpiry = now + 25  -- Niuzao lasts 25 seconds
+            niuzaoExpiry = now + 25
             return true
         end
 
-        -- Priority 9: Exploding Keg
+        -- P9: Exploding Keg
         if Config.useExplodingKeg
             and StateCache.hasExplodingKegTalent
             and StateCache.kegSmashFractionalCharges < 1
@@ -2261,7 +2286,7 @@ local function Bootstrap(attempt)
             return true
         end
 
-        -- Priority 10: Touch of Death
+        -- P10: Touch of Death
         if Config.useTouchOfDeath and target.combat then
             local targetHealth = target.health
             local playerHealth = UnitHealth("player") or 0
@@ -2271,33 +2296,33 @@ local function Bootstrap(attempt)
             end
         end
 
-        -- Priority 11: Chi Burst
+        -- P11: Chi Burst
         if StateCache.hasChiBurstTalent and TryTargetCast(Spells.ChiBurst, target, "chi_burst") then
             return true
         end
 
-        -- Priority 12: Celestial Infusion with Sober
+        -- P12: Celestial Infusion with Sober
         if ShouldUseNormalCelestialInfusion()
             and TrySelfCast(Spells.CelestialInfusion, "celestial_infusion_with_sober")
         then
             return true
         end
 
-        -- Priority 13: Black Ox Brew (resource recovery)
+        -- P13: Black Ox Brew (resource recovery)
         if ShouldUseNormalBlackOxBrew()
             and TrySelfCast(Spells.BlackOxBrew, "black_ox_brew_when_purify_and_infusion_cd")
         then
             return true
         end
 
-        -- Priority 14: Purifying Brew (routine stagger management)
+        -- P14: Purifying Brew (routine stagger management)
         if ShouldUseNormalPurifyingBrew()
             and TrySelfCast(Spells.PurifyingBrew, "purifying_brew_red_stagger_hp_not_full")
         then
             return true
         end
 
-        -- Priority 15: Tiger Palm filler (only when KS has no charges)
+        -- P15: Tiger Palm filler (only when KS far from ready)
         if ShouldUseFallbackTigerPalm(target)
             and StateCache.kegSmashFractionalCharges < 0.5
             and TryTargetCast(Spells.TigerPalm, target, "fallback_tiger_palm")
@@ -2308,6 +2333,7 @@ local function Bootstrap(attempt)
         LogStall(target, "core_rotation_fallthrough", {
             distance = RoundNumber(distance, 2),
             hasBlackoutCombo = StateCache.hasBlackoutCombo,
+            comboState = comboState,
         })
         return false
     end
