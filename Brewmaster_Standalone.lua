@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.1.0"
+local MODULE_VERSION = "2.1.1"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -2157,7 +2157,9 @@ local function Bootstrap(attempt)
         end
 
         -- Priority 3: Keg Smash at 2 charges (prevent waste)
-        if StateCache.kegSmashCharges >= 2
+        -- Skip if waiting for KS→BoF combo (don't override lastKegSmashTime with new KS)
+        if lastKegSmashTime == 0
+            and StateCache.kegSmashCharges >= 2
             and StateCache.playerEnergy >= Config.comboKegSmashEnergy
         then
             if CastKegSmash(target, "keg_smash_prevent_overcap") then
@@ -2167,7 +2169,8 @@ local function Bootstrap(attempt)
         end
 
         -- Priority 4: Blackout Combo branch (BC buff active)
-        if StateCache.hasBlackoutCombo then
+        -- Skip BC→KS if waiting for KS→BoF combo
+        if StateCache.hasBlackoutCombo and lastKegSmashTime == 0 then
             -- BC + KS has charges or nearly ready → save BC for KS, wait for energy
             if StateCache.kegSmashFractionalCharges >= 0.7 then
                 if StateCache.playerEnergy >= Config.comboKegSmashEnergy then
@@ -2220,8 +2223,9 @@ local function Bootstrap(attempt)
             if casted then return true end
         end
 
-        -- Priority 7: Keg Smash with 1 charge
-        if StateCache.kegSmashFractionalCharges >= 1
+        -- Priority 7: Keg Smash with 1 charge (skip if waiting for KS→BoF)
+        if lastKegSmashTime == 0
+            and StateCache.kegSmashFractionalCharges >= 1
             and StateCache.playerEnergy >= Config.defaultKegSmashEnergy
         then
             if CastKegSmash(target, "keg_smash_single_charge") then
