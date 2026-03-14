@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.0.0"
+local MODULE_VERSION = "2.1.0"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -2136,19 +2136,24 @@ local function Bootstrap(attempt)
             if casted then return true end
         end
 
-        -- Priority 2: KS→BoF forced combo (BoF must follow KS within 1.5s, no other spells between)
+        -- Priority 2: KS→BoF forced combo (KS resets BoF CD, so only GCD can block it)
         if Config.useBreathOfFire and (now - lastKegSmashTime) < 1.5 then
             local casted = CastBreathOfFire(target, "post_keg_breath")
             if casted then
                 lastKegSmashTime = 0
                 return true
             end
-            -- BoF failed (range/facing) — don't stall, but don't do other things either for 1 more tick
-            if (now - lastKegSmashTime) < 1.0 then
+            -- BoF CD is 0 (KS reset it) → must be GCD blocking, keep waiting
+            local bofCD = Spells.BreathOfFire and Spells.BreathOfFire.cd or 999
+            if bofCD <= 0 then
+                return false  -- wait for GCD to end, don't do anything else
+            end
+            -- BoF still on real CD (no Sal talent?) → give up after 1s
+            if (now - lastKegSmashTime) >= 1.0 then
+                lastKegSmashTime = 0
+            else
                 return false
             end
-            -- Gave it 1 second, BoF still can't fire — give up and continue
-            lastKegSmashTime = 0
         end
 
         -- Priority 3: Keg Smash at 2 charges (prevent waste)
