@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.1.5"
+local MODULE_VERSION = "2.1.6"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -2158,6 +2158,11 @@ local function Bootstrap(attempt)
                     return false
                 else
                     -- BoF on real CD (no Sal talent) or structural block → abandon immediately
+                    Logger:LogBlocked(Spells.BreathOfFire, target, "post_keg_breath_abandoned", "bof_on_cd_after_ks", {
+                        bofCD = RoundNumber(bofCD, 2),
+                        reason = reason,
+                        timeSinceKS = RoundNumber(now - lastKegSmashTime, 2),
+                    })
                     lastKegSmashTime = 0
                 end
             else
