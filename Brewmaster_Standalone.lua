@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.2.3"
+local MODULE_VERSION = "2.3.0"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -2117,6 +2117,19 @@ local function Bootstrap(attempt)
 
         local now = GetTime() or 0
 
+        -- GCD gate: don't attempt on-GCD casts while GCD is active
+        -- (warden spell:Cast() returns true during GCD, causing duplicate logs)
+        local gcdActive = false
+        if C_Spell and C_Spell.GetSpellCooldown then
+            local gcdInfo = C_Spell.GetSpellCooldown(61304)
+            if gcdInfo and gcdInfo.duration and gcdInfo.duration > 0 and gcdInfo.startTime then
+                local gcdLeft = (gcdInfo.startTime + gcdInfo.duration) - now
+                if gcdLeft > 0.1 then  -- 100ms tolerance
+                    gcdActive = true
+                end
+            end
+        end
+
         -- Update Niuzao active state
         if niuzaoActive and now > niuzaoExpiry then
             niuzaoActive = false
@@ -2146,6 +2159,12 @@ local function Bootstrap(attempt)
 
         if TryConfiguredInterrupt() then
             return true
+        end
+
+        -- GCD gate: skip all on-GCD actions while GCD is active
+        -- (warden spell:Cast() returns true during GCD, causing duplicate casts)
+        if gcdActive and comboState ~= "waiting_bof" then
+            return false
         end
 
         -- ============================================================
