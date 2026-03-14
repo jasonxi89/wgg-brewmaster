@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.2.2"
+local MODULE_VERSION = "2.2.3"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -2180,13 +2180,17 @@ local function Bootstrap(attempt)
                 return true
             end
 
-            -- BoF has real CD (not just GCD) → check talent
+            -- BoF has real CD (not just GCD) → check talent + latency
             if bofRemaining > 0 then
-                if StateCache.hasSalTalent and (now - comboStartTime) < 0.3 then
-                    -- Sal talent but BoF CD still showing (server latency < 300ms) → wait a bit
-                    return false
-                elseif StateCache.hasSalTalent and (now - comboStartTime) >= 0.3 then
-                    -- Waited 300ms for Sal reset, BoF still on CD → force wait until timeout
+                if StateCache.hasSalTalent then
+                    -- Sal talent: KS will reset BoF CD, but server latency delays the update
+                    -- Wait at least (latency * 2 + 200ms) before trusting CD value
+                    local latency = warden.latency or 0.1
+                    local latencyGrace = math.max(latency * 2, 0.2) + 0.2
+                    if (now - comboStartTime) < latencyGrace then
+                        return false  -- still within latency window, CD value unreliable
+                    end
+                    -- Past latency grace: Sal should have reset by now, trust the wait
                     return false
                 else
                     -- No Sal talent, BoF truly on CD → abandon
