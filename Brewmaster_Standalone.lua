@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.2.1"
+local MODULE_VERSION = "2.2.2"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -2150,8 +2150,29 @@ local function Bootstrap(attempt)
 
         -- ============================================================
         -- PHASE 1: KS→BoF forced combo (when Sal'salabim talent active)
+        -- Uses raw WoW API for precise GCD/CD detection instead of warden Castable()
         -- ============================================================
         if comboState == "waiting_bof" then
+            -- Raw API: check GCD and BoF CD independently
+            local gcdRemaining = 0
+            local bofRemaining = 0
+
+            if C_Spell and C_Spell.GetSpellCooldown then
+                local gcdInfo = C_Spell.GetSpellCooldown(61304)  -- GCD spell
+                if gcdInfo and gcdInfo.startTime and gcdInfo.duration and gcdInfo.duration > 0 then
+                    gcdRemaining = (gcdInfo.startTime + gcdInfo.duration) - now
+                    if gcdRemaining < 0 then gcdRemaining = 0 end
+                end
+
+                local bofInfo = C_Spell.GetSpellCooldown(115181)  -- BoF
+                if bofInfo and bofInfo.startTime and bofInfo.duration and bofInfo.duration > 1.5 then
+                    -- duration > 1.5 means real CD (not GCD)
+                    bofRemaining = (bofInfo.startTime + bofInfo.duration) - now
+                    if bofRemaining < 0 then bofRemaining = 0 end
+                end
+            end
+
+            -- Try warden Castable first (handles facing, range, etc.)
             local casted = CastBreathOfFire(target, "post_keg_breath")
             if casted then
                 comboState = "idle"
@@ -2159,22 +2180,48 @@ local function Bootstrap(attempt)
                 return true
             end
 
-            -- Diagnose why BoF failed
-            local bofCD = Spells.BreathOfFire and Spells.BreathOfFire.cd or 999
-            local gcdLeft = warden.GetGCD and warden.GetGCD() or 0
-
-            if StateCache.hasSalTalent then
-                -- Has Sal talent: KS WILL reset BoF CD (server latency may show bofCD > 0 briefly)
-                -- Just wait — the 1.5s timeout is the only escape
+            -- BoF has real CD (not just GCD) → check talent
+            if bofRemaining > 0 then
+                if StateCache.hasSalTalent and (now - comboStartTime) < 0.3 then
+                    -- Sal talent but BoF CD still showing (server latency < 300ms) → wait a bit
+                    return false
+                elseif StateCache.hasSalTalent and (now - comboStartTime) >= 0.3 then
+                    -- Waited 300ms for Sal reset, BoF still on CD → force wait until timeout
+                    return false
+                else
+                    -- No Sal talent, BoF truly on CD → abandon
+                    Logger:LogBlocked(Spells.BreathOfFire, target, "combo_abandoned", "bof_on_cd_no_sal", {
+                        bofRemaining = RoundNumber(bofRemaining, 2),
+                        gcdRemaining = RoundNumber(gcdRemaining, 2),
+                    })
+                    comboState = "idle"
+                    comboStartTime = 0
+                end
+            elseif gcdRemaining > 0 then
+                -- BoF CD=0 but GCD still active → wait (normal, GCD from KS)
                 return false
-            elseif bofCD > 0 then
-                -- No Sal talent, BoF truly on CD → abandon combo
-                Logger:LogBlocked(Spells.BreathOfFire, target, "combo_abandoned", "bof_on_cd_no_sal", {
-                    bofCD = RoundNumber(bofCD, 2),
-                    gcdLeft = RoundNumber(gcdLeft, 2),
-                })
-                comboState = "idle"
-                comboStartTime = 0
+            else
+                -- BoF CD=0, GCD=0, but CastBreathOfFire still failed
+                -- Likely facing/range/no_enemy_in_melee
+                -- Try force cast via raw API as last resort
+                local cp = _G.WGG_CallProtected or (_G.WGG and _G.WGG.CallProtected)
+                local bofName = Spells.BreathOfFire and Spells.BreathOfFire.name
+                if cp and bofName and StateCache.enemiesInMelee >= 1 then
+                    pcall(cp, CastSpellByName, bofName)
+                    -- Log the force attempt
+                    Logger:Log("spell_issued", bofName, {
+                        context = "post_keg_breath_force",
+                        spellId = 115181,
+                        spellName = bofName,
+                        method = "raw_callprotected",
+                    }, target)
+                    comboState = "idle"
+                    comboStartTime = 0
+                    return true
+                end
+                -- No enemies in melee or no API → wait
+                return false
+            end
             else
                 -- BoF CD=0, blocked by GCD or facing/range → wait
                 return false
