@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.1.4"
+local MODULE_VERSION = "2.1.5"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -2153,18 +2153,12 @@ local function Bootstrap(attempt)
                 end
                 -- Check why BoF failed
                 local bofCD = Spells.BreathOfFire and Spells.BreathOfFire.cd or 999
-                if reason == "no_enemy_in_melee" or reason == "not_known" then
-                    -- Structural block (kiting/no talent) → abandon combo immediately
-                    lastKegSmashTime = 0
-                elseif bofCD <= 0 then
-                    -- BoF CD=0, transient block (GCD/facing) → wait
+                if bofCD <= 0 then
+                    -- BoF CD=0 (KS reset it via Sal talent), transient block (GCD/facing) → wait
                     return false
-                elseif (now - lastKegSmashTime) >= 1.0 then
-                    -- BoF on real CD, waited 1s → give up
-                    lastKegSmashTime = 0
                 else
-                    -- BoF on real CD, still waiting
-                    return false
+                    -- BoF on real CD (no Sal talent) or structural block → abandon immediately
+                    lastKegSmashTime = 0
                 end
             else
                 -- 1.5s window expired without BoF — safety reset to prevent permanent KS lockout
