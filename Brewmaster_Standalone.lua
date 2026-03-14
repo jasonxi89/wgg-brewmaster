@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.1.1"
+local MODULE_VERSION = "2.1.2"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -2133,26 +2133,38 @@ local function Bootstrap(attempt)
             and not StateCache.hasBreathOfFireDot
         then
             local casted = CastBreathOfFire(target, "burst_breath_of_fire")
-            if casted then return true end
+            if casted then
+                lastKegSmashTime = 0  -- burst BoF satisfies the KS→BoF combo
+                return true
+            end
         end
 
         -- Priority 2: KS→BoF forced combo (KS resets BoF CD, so only GCD can block it)
-        if Config.useBreathOfFire and (now - lastKegSmashTime) < 1.5 then
-            local casted = CastBreathOfFire(target, "post_keg_breath")
-            if casted then
-                lastKegSmashTime = 0
-                return true
-            end
-            -- BoF CD is 0 (KS reset it) → must be GCD blocking, keep waiting
-            local bofCD = Spells.BreathOfFire and Spells.BreathOfFire.cd or 999
-            if bofCD <= 0 then
-                return false  -- wait for GCD to end, don't do anything else
-            end
-            -- BoF still on real CD (no Sal talent?) → give up after 1s
-            if (now - lastKegSmashTime) >= 1.0 then
-                lastKegSmashTime = 0
+        if Config.useBreathOfFire and lastKegSmashTime > 0 then
+            if (now - lastKegSmashTime) < 1.5 then
+                local casted, reason = CastBreathOfFire(target, "post_keg_breath")
+                if casted then
+                    lastKegSmashTime = 0
+                    return true
+                end
+                -- Check why BoF failed
+                local bofCD = Spells.BreathOfFire and Spells.BreathOfFire.cd or 999
+                if reason == "no_enemy_in_melee" or reason == "not_known" then
+                    -- Structural block (kiting/no talent) → abandon combo immediately
+                    lastKegSmashTime = 0
+                elseif bofCD <= 0 then
+                    -- BoF CD=0, transient block (GCD/facing) → wait
+                    return false
+                elseif (now - lastKegSmashTime) >= 1.0 then
+                    -- BoF on real CD, waited 1s → give up
+                    lastKegSmashTime = 0
+                else
+                    -- BoF on real CD, still waiting
+                    return false
+                end
             else
-                return false
+                -- 1.5s window expired without BoF — safety reset to prevent permanent KS lockout
+                lastKegSmashTime = 0
             end
         end
 
