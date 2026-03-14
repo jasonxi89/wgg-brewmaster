@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.1.2"
+local MODULE_VERSION = "2.1.3"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -2140,6 +2140,10 @@ local function Bootstrap(attempt)
         end
 
         -- Priority 2: KS→BoF forced combo (KS resets BoF CD, so only GCD can block it)
+        -- Safety: if BoF is disabled, clear combo state immediately
+        if lastKegSmashTime > 0 and not Config.useBreathOfFire then
+            lastKegSmashTime = 0
+        end
         if Config.useBreathOfFire and lastKegSmashTime > 0 then
             if (now - lastKegSmashTime) < 1.5 then
                 local casted, reason = CastBreathOfFire(target, "post_keg_breath")
