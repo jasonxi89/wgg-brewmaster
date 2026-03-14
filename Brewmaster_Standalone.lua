@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.3.5"
+local MODULE_VERSION = "2.4.0"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -2184,8 +2184,9 @@ local function Bootstrap(attempt)
             -- No Sal talent → try once, if BoF on CD abandon immediately
             local casted = CastBreathOfFire(target, "post_keg_breath")
             if casted then
-                comboState = "idle"
-                comboStartTime = 0
+                -- Don't clear comboState here — wait for UNIT_SPELLCAST_SUCCEEDED
+                -- to confirm server actually accepted the cast.
+                -- Keep returning true so rotation doesn't do anything else this tick.
                 return true
             end
 
@@ -3147,6 +3148,12 @@ local function Bootstrap(attempt)
             spellId = spellID,
             spellName = spellName,
         }, warden.target)
+
+        -- BoF confirmed by server → clear combo (authoritative confirmation)
+        if spellID == 115181 and comboState == "waiting_bof" then
+            comboState = "idle"
+            comboStartTime = 0
+        end
     end)
 
     Success("Brewmaster v" .. MODULE_VERSION .. " loaded. Commands: /bm, /brewmaster")
