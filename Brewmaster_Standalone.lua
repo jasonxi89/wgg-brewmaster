@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.4.1"
+local MODULE_VERSION = "2.5.0"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -82,20 +82,41 @@ local function Bootstrap(attempt)
     local tickHandle = nil
 
     -- Warden compatibility helpers
+
+    -- Pre-built token list (created once at load, never GC'd)
+    local UNIT_TOKENS = {"target", "focus", "mouseover", "boss1", "boss2", "boss3", "boss4", "boss5"}
+    for i = 1, 40 do UNIT_TOKENS[#UNIT_TOKENS+1] = "nameplate" .. i end
+    for i = 1, 4 do UNIT_TOKENS[#UNIT_TOKENS+1] = "party" .. i end
+    for i = 1, 40 do UNIT_TOKENS[#UNIT_TOKENS+1] = "raid" .. i end
+
+    -- GUID→Token cache: refreshed at most once per tick (~30ms)
+    local guidTokenCache = {}
+    local guidTokenCacheTime = 0
+
+    local function RefreshGuidTokenCache()
+        local now = GetTime()
+        if (now - guidTokenCacheTime) < 0.03 then return end
+        guidTokenCacheTime = now
+        wipe(guidTokenCache)
+        for _, token in ipairs(UNIT_TOKENS) do
+            local guid = UnitGUID(token)
+            if guid and not guidTokenCache[guid] then
+                guidTokenCache[guid] = token
+            end
+        end
+    end
+
     local function GetUnitToken(unit)
         if not unit then return nil end
-        -- Try common tokens by matching GUID
         local guid = unit.guid
         if not guid then return nil end
-        local tokens = {"target", "focus", "mouseover", "boss1", "boss2", "boss3", "boss4", "boss5"}
-        for i = 1, 40 do tokens[#tokens+1] = "nameplate" .. i end
-        for i = 1, 4 do tokens[#tokens+1] = "party" .. i end
-        for i = 1, 40 do tokens[#tokens+1] = "raid" .. i end
-        for _, token in ipairs(tokens) do
-            if UnitGUID(token) == guid then return token end
-        end
-        return nil
+        RefreshGuidTokenCache()
+        return guidTokenCache[guid]
     end
+
+    -- Cached enemy list: single IterateEnemies call per tick, all consumers read this
+    local tickEnemyList = {}
+    local tickEnemyListTime = 0
 
     local function IterateEnemies(callback)
         local list = warden.allEnemies or warden.enemies
@@ -109,24 +130,39 @@ local function Bootstrap(attempt)
         end
     end
 
-    local function GetClosestEnemy(range)
-        local closest, closestDist = nil, range or 35
+    local function RefreshTickEnemyList()
+        local now = GetTime()
+        if (now - tickEnemyListTime) < 0.03 then return end
+        tickEnemyListTime = now
+        wipe(tickEnemyList)
         IterateEnemies(function(enemy)
-            if enemy.exists and not enemy.dead and enemy.distance and enemy.distance < closestDist then
+            if enemy.exists and not enemy.dead then
+                tickEnemyList[#tickEnemyList + 1] = enemy
+            end
+        end)
+    end
+
+    local function GetClosestEnemy(range)
+        RefreshTickEnemyList()
+        local closest, closestDist = nil, range or 35
+        for _, enemy in ipairs(tickEnemyList) do
+            if enemy.distance and enemy.distance < closestDist then
                 closestDist = enemy.distance
                 closest = enemy
             end
-        end)
+        end
         return closest
     end
 
     local function GetEnemiesInRange(range)
+        RefreshTickEnemyList()
         local result = {}
-        IterateEnemies(function(enemy)
-            if enemy.exists and not enemy.dead and enemy.distance and enemy.distance <= (range or 35) then
+        local maxRange = range or 35
+        for _, enemy in ipairs(tickEnemyList) do
+            if enemy.distance and enemy.distance <= maxRange then
                 result[#result + 1] = enemy
             end
-        end)
+        end
         return result
     end
 
@@ -383,9 +419,7 @@ local function Bootstrap(attempt)
 
     local function IsExternalSpellPending()
         if warden and warden.IsGroundCursorPending then
-            local ok, pending = pcall(function()
-                return warden.IsGroundCursorPending()
-            end)
+            local ok, pending = pcall(warden.IsGroundCursorPending)
             if ok then
                 return pending == true
             end
@@ -854,11 +888,9 @@ local function Bootstrap(attempt)
             return
         end
 
-        local key = table.concat({
-            tostring(spell and spell.id or "unknown"),
-            tostring(context or "unknown"),
-            tostring(reason or "unknown"),
-        }, ":")
+        local key = tostring(spell and spell.id or "unknown")
+            .. ":" .. tostring(context or "unknown")
+            .. ":" .. tostring(reason or "unknown")
 
         local now = GetTime() or 0
         local lastLoggedAt = self.lastBlockedByKey[key] or 0
@@ -1067,8 +1099,9 @@ local function Bootstrap(attempt)
         local sumX, sumY, sumZ = 0, 0, 0
         local count = 0
 
-        IterateEnemies(function(enemy)
-            if IsEnemy(enemy) then
+        RefreshTickEnemyList()
+        for _, enemy in ipairs(tickEnemyList) do
+            if enemy.enemy then
                 local nearTarget = enemy.distanceTo and enemy.distanceTo(target)
                 if nearTarget and nearTarget <= clusterRadius and (not requireCombat or enemy.combat) then
                     local ex, ey, ez = enemy.x, enemy.y, enemy.z
@@ -1080,7 +1113,7 @@ local function Bootstrap(attempt)
                     end
                 end
             end
-        end)
+        end
 
         if count < 1 then
             return targetX, targetY, targetZ, 1
@@ -1089,7 +1122,8 @@ local function Bootstrap(attempt)
         return sumX / count, sumY / count, sumZ / count, count
     end
 
-    local lastExplodingKegPos = nil  -- {x, y, z, time} for draw overlay
+    local lastExplodingKegPos = { x = 0, y = 0, z = 0, time = 0 }
+    local hasExplodingKegPos = false
 
     local function CastExplodingKeg(target, context)
         local x, y, z, clusterCount = GetExplodingKegCastPosition(target)
@@ -1102,7 +1136,11 @@ local function Bootstrap(attempt)
             clusterCount = clusterCount or 1,
         })
         if casted then
-            lastExplodingKegPos = { x = x, y = y, z = z, time = GetTime() }
+            lastExplodingKegPos.x = x
+            lastExplodingKegPos.y = y
+            lastExplodingKegPos.z = z
+            lastExplodingKegPos.time = GetTime()
+            hasExplodingKegPos = true
         end
         return casted
     end
@@ -1295,26 +1333,25 @@ local function Bootstrap(attempt)
             StateCache.hasBreathOfFireDot = false
         end
 
+        -- Use cached enemy list (single iteration per tick, no closure)
+        RefreshTickEnemyList()
         StateCache.enemiesInMelee = 0
         StateCache.enemiesIn8y = 0
         StateCache.enemiesIn10y = 0
-        IterateEnemies(function(enemy)
-            if enemy.exists and not IsDead(enemy) then
-                local dist = enemy.distance
-                if dist then
-                    if IsTargetInMeleeRange(enemy) then
-                        StateCache.enemiesInMelee = StateCache.enemiesInMelee + 1
-                    end
-
-                    if dist <= 10 then
-                        StateCache.enemiesIn10y = StateCache.enemiesIn10y + 1
-                        if dist <= 8 then
-                            StateCache.enemiesIn8y = StateCache.enemiesIn8y + 1
-                        end
+        for _, enemy in ipairs(tickEnemyList) do
+            local dist = enemy.distance
+            if dist then
+                if IsTargetInMeleeRange(enemy) then
+                    StateCache.enemiesInMelee = StateCache.enemiesInMelee + 1
+                end
+                if dist <= 10 then
+                    StateCache.enemiesIn10y = StateCache.enemiesIn10y + 1
+                    if dist <= 8 then
+                        StateCache.enemiesIn8y = StateCache.enemiesIn8y + 1
                     end
                 end
             end
-        end)
+        end
 
 
         StateCache.lastUpdate = currentTime
@@ -1489,37 +1526,37 @@ local function Bootstrap(attempt)
         if Config.interruptAll then
             local maxRemaining = tonumber(Config.interruptMaxRemaining) or 0.8
             local bestEnemy, bestRemaining = nil, 999
-            IterateEnemies(function(e)
-                if not e.exists or e.dead or (e.distance or 999) > 5 then return end
+            RefreshTickEnemyList()
+            for _, e in ipairs(tickEnemyList) do
+                if (e.distance or 999) <= 5 then
+                    -- Use warden properties first (more reliable than token lookup)
+                    local isCasting = e.casting or e.channeling
+                    local canInterrupt = e.interruptable
+                    local rem = e.casttimeleft or e.channeltimeleft or 999
 
-                -- Use warden properties first (more reliable than token lookup)
-                local isCasting = e.casting or e.channeling
-                local canInterrupt = e.interruptable
-                local rem = e.casttimeleft or e.channeltimeleft or 999
+                    if isCasting and canInterrupt ~= false then
+                        -- If warden properties unavailable, fall back to token-based check
+                        if rem == 999 then
+                            local token = GetUnitToken(e)
+                            if token then
+                                local _, _, _, _, castEnd, _, _, notInterruptible = UnitCastingInfo(token)
+                                local _, _, _, _, chanEnd, _, notInterruptibleCh = UnitChannelInfo(token)
+                                local nowMs = GetTime() * 1000
+                                if castEnd and not notInterruptible then
+                                    rem = (castEnd - nowMs) / 1000
+                                elseif chanEnd and not notInterruptibleCh then
+                                    rem = (chanEnd - nowMs) / 1000
+                                end
+                            end
+                        end
 
-                if not isCasting then return end
-                if canInterrupt == false then return end
-
-                -- If warden properties unavailable, fall back to token-based check
-                if rem == 999 then
-                    local token = GetUnitToken(e)
-                    if token then
-                        local _, _, _, _, castEnd, _, _, notInterruptible = UnitCastingInfo(token)
-                        local _, _, _, _, chanEnd, _, notInterruptibleCh = UnitChannelInfo(token)
-                        local now = GetTime() * 1000
-                        if castEnd and not notInterruptible then
-                            rem = (castEnd - now) / 1000
-                        elseif chanEnd and not notInterruptibleCh then
-                            rem = (chanEnd - now) / 1000
+                        if rem > 0 and rem <= maxRemaining and rem < bestRemaining then
+                            bestRemaining = rem
+                            bestEnemy = e
                         end
                     end
                 end
-
-                if rem > 0 and rem <= maxRemaining and rem < bestRemaining then
-                    bestRemaining = rem
-                    bestEnemy = e
-                end
-            end)
+            end
             if bestEnemy then
                 FaceTarget(bestEnemy, 8)
                 -- Try Spear Hand Strike first
@@ -1762,17 +1799,18 @@ local function Bootstrap(attempt)
             return false
         end
 
+        -- Fast path: distance available (most common case, avoids GetUnitToken)
+        local distance = target.distance
+        if distance then
+            return distance <= (tonumber(Config.meleeRangeTolerance) or 8.5)
+        end
+
+        -- Slow path: spell range check only when distance is nil
         local meleeRangeResult = GetSpellRangeCheckResult(Spells.BlackoutKick, target)
         if meleeRangeResult == nil then
             meleeRangeResult = GetSpellRangeCheckResult(Spells.TigerPalm, target)
         end
-        if meleeRangeResult ~= nil then
-            return meleeRangeResult
-        end
-
-        local distance = target.distance
-        local tolerance = tonumber(Config.meleeRangeTolerance) or 8.5
-        return distance and distance <= tolerance or false
+        return meleeRangeResult or false
     end
 
     local function GetNPCIDFromGUID(guid)
@@ -1784,8 +1822,19 @@ local function Bootstrap(attempt)
         return tonumber(npcId or "")
     end
 
+    -- Group member cache: roster rarely changes during combat
+    local groupMemberCache = {}
+    local groupMemberSubTables = {}
+    local groupMemberCacheTime = 0
+    local GROUP_MEMBER_CACHE_INTERVAL = 2.0
+
     local function BuildGroupMemberMap()
-        local members = {}
+        local now = GetTime()
+        if (now - groupMemberCacheTime) < GROUP_MEMBER_CACHE_INTERVAL then
+            return groupMemberCache
+        end
+        groupMemberCacheTime = now
+        wipe(groupMemberCache)
 
         local function addUnit(token)
             if not token or not UnitExists(token) then
@@ -1797,10 +1846,14 @@ local function Bootstrap(attempt)
                 return
             end
 
-            members[guid] = {
-                token = token,
-                role = (UnitGroupRolesAssigned and UnitGroupRolesAssigned(token)) or "NONE",
-            }
+            local sub = groupMemberSubTables[guid]
+            if not sub then
+                sub = {}
+                groupMemberSubTables[guid] = sub
+            end
+            sub.token = token
+            sub.role = (UnitGroupRolesAssigned and UnitGroupRolesAssigned(token)) or "NONE"
+            groupMemberCache[guid] = sub
         end
 
         addUnit("player")
@@ -1814,7 +1867,7 @@ local function Bootstrap(attempt)
             end
         end
 
-        return members
+        return groupMemberCache
     end
 
     local function GetEnemyTargetToken(enemy)
@@ -1866,7 +1919,8 @@ local function Bootstrap(attempt)
         local candidates = {}
         local primaryCandidate = nil
 
-        IterateEnemies(function(enemy)
+        RefreshTickEnemyList()
+        for _, enemy in ipairs(tickEnemyList) do
             local info = GetCombatTauntTargetInfo(enemy, groupMembers)
             if info then
                 candidates[#candidates + 1] = info
@@ -1874,7 +1928,7 @@ local function Bootstrap(attempt)
                     primaryCandidate = info
                 end
             end
-        end)
+        end
 
         if #candidates == 0 then
             return nil, nil
@@ -2254,18 +2308,25 @@ local function Bootstrap(attempt)
                         return true
                     end
                 end
-                -- Wait for energy — Chi Burst as filler
-                if StateCache.hasChiBurstTalent then
-                    local casted = TryTargetCast(Spells.ChiBurst, target, "chi_burst_while_waiting_energy")
-                    if casted then return true end
+                -- Estimate energy wait: <= 1 GCD briefly wait, > 1 GCD fall through to TP
+                local energyDeficit = Config.comboKegSmashEnergy - StateCache.playerEnergy
+                local _, combatRegen = GetPowerRegen("player")
+                local energyWaitTime = energyDeficit / math.max(combatRegen or 10, 1)
+                if energyWaitTime <= 1.0 then
+                    if StateCache.hasChiBurstTalent then
+                        local casted = TryTargetCast(Spells.ChiBurst, target, "chi_burst_while_waiting_energy")
+                        if casted then return true end
+                    end
+                    LogStall(target, "waiting_for_blackout_combo_keg_smash", {
+                        distance = RoundNumber(distance, 2),
+                        playerEnergy = StateCache.playerEnergy,
+                        requiredEnergy = Config.comboKegSmashEnergy,
+                        kegSmashCharges = RoundNumber(StateCache.kegSmashFractionalCharges, 2),
+                        energyWaitTime = RoundNumber(energyWaitTime, 2),
+                    })
+                    return false
                 end
-                LogStall(target, "waiting_for_blackout_combo_keg_smash", {
-                    distance = RoundNumber(distance, 2),
-                    playerEnergy = StateCache.playerEnergy,
-                    requiredEnergy = Config.comboKegSmashEnergy,
-                    kegSmashCharges = RoundNumber(StateCache.kegSmashFractionalCharges, 2),
-                })
-                return false
+                -- Wait > 1 GCD: fall through to consume BC with Tiger Palm
             end
 
             -- BC + KS not ready → consume BC with Tiger Palm
@@ -2378,6 +2439,10 @@ local function Bootstrap(attempt)
         local player = warden.player
         local bestTarget = GetBestTarget()
 
+        -- Refresh per-tick caches once (all consumers read from these)
+        RefreshGuidTokenCache()
+        RefreshTickEnemyList()
+
         UpdateStateCache(bestTarget)
         UpdateBurstNiuzaoState()
         Logger:HandleCombatState(bestTarget)
@@ -2407,7 +2472,7 @@ local function Bootstrap(attempt)
             return
         end
 
-        if ManageCombatTaunts(bestTarget) then
+        if StateCache.playerInCombat and ManageCombatTaunts(bestTarget) then
             return
         end
 
@@ -3131,14 +3196,14 @@ local function Bootstrap(attempt)
         end
 
         -- Exploding Keg landing zone (red circle, shows for 2s after cast to warn about pulling mobs out)
-        if lastExplodingKegPos then
+        if hasExplodingKegPos then
             local elapsed = (GetTime() or 0) - (lastExplodingKegPos.time or 0)
             if elapsed < 2 then
                 local ekRadius = tonumber(Config.explodingKegClusterRadius) or 8
                 local alpha = 0.8 * (1 - elapsed / 2)  -- fade out over 2s
                 DRAW_API.DrawCircle(lastExplodingKegPos.x, lastExplodingKegPos.y, lastExplodingKegPos.z, ekRadius, 1, 0.1, 0, alpha, 5, 0, 0, 48)
             else
-                lastExplodingKegPos = nil
+                hasExplodingKegPos = false
             end
         end
     end)
