@@ -19,7 +19,7 @@
 ================================================================================
 ]]
 
-local MODULE_VERSION = "2.5.0"
+local MODULE_VERSION = "2.5.1"
 
 -- Capture WGG object at file top level (... only works here, not inside functions)
 local _WGG_FROM_LOADER = ...
@@ -1710,6 +1710,7 @@ local function Bootstrap(attempt)
         return Config.useCelestialInfusion
             and StateCache.hasCelestialInfusionTalent
             and StateCache.hasSoberBuff
+            and not HasConfiguredSpikeSoon()
     end
 
     local function ShouldUseNormalBlackOxBrew()
@@ -1727,7 +1728,7 @@ local function Bootstrap(attempt)
     local function ShouldUseNormalPurifyingBrew()
         return Config.autoManageStagger
             and StateCache.isHeavyStagger
-            and StateCache.playerHP < 80
+            and StateCache.playerHP < (tonumber(Config.redStaggerHealthThreshold) or 80)
     end
 
     local function ShouldUseFallbackTigerPalm(target)
@@ -1757,7 +1758,7 @@ local function Bootstrap(attempt)
         return not spell.usable
     end
 
-    local function ShouldUseSpikeFallbackPurifying()
+    ShouldUseSpikeFallbackPurifying = function()
         local fortifyingUnavailable = IsSpellUnavailableForSpikeResponse(Spells.FortifyingBrew, true)
         local celestialInfusionUnavailable = IsSpellUnavailableForSpikeResponse(
             Spells.CelestialInfusion,
@@ -2419,9 +2420,8 @@ local function Bootstrap(attempt)
             return true
         end
 
-        -- P15: Tiger Palm filler (only when KS far from ready)
+        -- P15: Tiger Palm filler (when BoK on CD)
         if ShouldUseFallbackTigerPalm(target)
-            and StateCache.kegSmashFractionalCharges < 0.5
             and TryTargetCast(Spells.TigerPalm, target, "fallback_tiger_palm")
         then
             return true
@@ -2477,6 +2477,10 @@ local function Bootstrap(attempt)
         end
 
         if StateCache.playerInCombat and not bestTarget then
+            if comboState ~= "idle" then
+                comboState = "idle"
+                comboStartTime = 0
+            end
             if ManageDefensives() then
                 return
             end
